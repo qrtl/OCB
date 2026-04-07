@@ -58,7 +58,15 @@ class MrpProduction(models.Model):
             unauthorized_fields = set(vals.keys()) - set(self._get_writeable_fields_portal_user())
             if unauthorized_fields:
                 raise AccessError(_("You cannot write on fields %s in mrp.production.", ', '.join(unauthorized_fields)))
-        return super().write(vals)
+        res = super().write(vals)
+        if 'lot_producing_id' in vals and vals.get('lot_producing_id'):
+            for production in self:
+                if production._should_auto_record_subcontract_components():
+                    try:
+                        production.subcontracting_record_component()
+                    except Exception:
+                        pass
+        return res
 
     def action_merge(self):
         if any(production._get_subcontract_move() for production in self):
@@ -203,4 +211,27 @@ class MrpProduction(models.Model):
             for sml in production.move_raw_ids.move_line_ids:
                 if sml.tracking != 'none' and not sml.lot_id:
                     raise UserError(_('You must enter a serial number for each line of %s') % sml.product_id.display_name)
+        return True
+
+    def action_generate_serial(self):
+        res = super().action_generate_serial()
+        if self._should_auto_record_subcontract_components():
+            try:
+                self.subcontracting_record_component()
+            except Exception:
+                pass
+        return res
+
+    def _should_auto_record_subcontract_components(self):
+        self.ensure_one()
+        if (
+            not self.lot_producing_id
+            or self.subcontracting_has_been_recorded
+            or not self._get_subcontract_move()
+            or self.state in ('done', 'cancel')
+            or self.product_id.tracking != 'serial'
+        ):
+            return False
+        if not self.move_raw_ids or not any(self.move_raw_ids.mapped('quantity_done')):
+            return False
         return True
